@@ -588,7 +588,7 @@ impl<TPlat: Platform> Task<TPlat> {
         // return value.
         match self.sync.process_one() {
             all::ProcessOne::AllSync(sync) => {
-                log::info!("all::ProcessOne::AllSync");
+                // log::info!("all::ProcessOne::AllSync");
 
                 // Nothing to do. Queue is empty.
                 self.sync = sync;

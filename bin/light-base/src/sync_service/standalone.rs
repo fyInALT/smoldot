@@ -44,9 +44,11 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
     network_chain_index: usize,
     from_network_service: stream::BoxStream<'static, network_service::Event>,
 ) {
+    log::info!(target: "Debug", "chain_info: {:?}", chain_information);
+
     let mut task = Task {
         sync: all::AllSync::new(all::Config {
-            chain_information,
+            chain_information: chain_information.clone(),
             sources_capacity: 32,
             blocks_capacity: {
                 // This is the maximum number of blocks between two consecutive justifications.
@@ -266,6 +268,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
                     // Inject the result of the request into the sync state machine.
                     task.sync.storage_get_response(
                         request_id,
+                        chain_information.clone(),
                         result.map(|list| list.into_iter()),
                     ).1
 
@@ -584,12 +587,16 @@ impl<TPlat: Platform> Task<TPlat> {
         // return value.
         match self.sync.process_one() {
             all::ProcessOne::AllSync(sync) => {
+                log::info!("all::ProcessOne::AllSync");
+
                 // Nothing to do. Queue is empty.
                 self.sync = sync;
                 return (self, false);
             }
 
             all::ProcessOne::VerifyWarpSyncFragment(verify) => {
+                log::info!("all::ProcessOne::VerifyWarpSyncFragment");
+
                 // Grandpa warp sync fragment to verify.
                 let sender_peer_id = verify.proof_sender().1 .0.clone(); // TODO: unnecessary cloning most of the time
 
@@ -607,6 +614,8 @@ impl<TPlat: Platform> Task<TPlat> {
             }
 
             all::ProcessOne::VerifyHeader(verify) => {
+                log::info!("all::ProcessOne::VerifyHeader {:?}", verify.height());
+
                 // Header to verify.
                 let verified_hash = verify.hash();
                 let verified_height = verify.height();
@@ -749,6 +758,8 @@ impl<TPlat: Platform> Task<TPlat> {
             }
 
             all::ProcessOne::VerifyJustification(verify) => {
+                log::info!("all::ProcessOne::VerifyJustification");
+    
                 // Justification to verify.
                 match verify.perform() {
                     (
@@ -761,7 +772,7 @@ impl<TPlat: Platform> Task<TPlat> {
                     ) => {
                         self.sync = sync;
 
-                        log::debug!(
+                        log::info!(
                             target: &self.log_target,
                             "Sync => JustificationVerified(finalized_blocks={})",
                             finalized_blocks.len(),

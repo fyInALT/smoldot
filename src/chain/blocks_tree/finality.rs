@@ -179,6 +179,8 @@ impl<T> NonFinalizedTreeInner<T> {
         ),
         FinalityVerifyError,
     > {
+        log::info!("verify_grandpa_finality to number {:?}", target_number);
+
         match &self.finality {
             Finality::Outsourced => panic!(),
             Finality::Grandpa {

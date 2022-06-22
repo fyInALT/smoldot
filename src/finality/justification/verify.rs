@@ -38,6 +38,10 @@ pub struct Config<'a, I> {
 
 /// Verifies that a justification is valid.
 pub fn verify(config: Config<impl Iterator<Item = impl AsRef<[u8]>> + Clone>) -> Result<(), Error> {
+    log::info!(target: "Verifier", "verify the justification {:?}", config.justification);
+    log::info!(target: "Verifier", "verify the justification authorities_set_id {:?}", config.authorities_set_id);
+
+
     // Check that justification contains a number of signatures equal to at least 2/3rd of the
     // number of authorities.
     // Duplicate signatures are checked below.

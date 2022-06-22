@@ -121,6 +121,8 @@ impl Verifier {
     }
 
     pub fn next(mut self) -> Result<Next, Error> {
+        log::info!(target: "Verifier", "Verifier next : {:?} {:?}", self.index, self.fragments);
+
         if self.wrong_chain_algorithm {
             return Err(Error::WrongChainAlgorithm);
         }
@@ -134,6 +136,8 @@ impl Verifier {
 
         debug_assert!(self.fragments.len() > self.index);
         let fragment = &self.fragments[self.index];
+
+        log::info!(target: "Verifier", "Verifier current : {:?}", fragment);
 
         let fragment_header_hash =
             header::hash_from_scale_encoded_header(&fragment.scale_encoded_header);

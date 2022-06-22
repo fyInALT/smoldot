@@ -1318,6 +1318,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
     pub fn storage_get_response(
         &mut self,
         request_id: RequestId,
+        chain_information: chain_information::ValidChainInformation,
         response: Result<impl Iterator<Item = Option<impl AsRef<[u8]>>>, ()>,
     ) -> (TRq, ResponseOutcome) {
         debug_assert!(self.shared.requests.contains(request_id.0));
@@ -1354,6 +1355,7 @@ impl<TRq, TSrc, TBl> AllSync<TRq, TSrc, TBl> {
                     heap_pages,
                     ExecHint::CompileAheadOfTime,
                     false,
+                    Some(chain_information), // TODO by FanYang: just to use the genesis chain info
                 );
 
                 match outcome {

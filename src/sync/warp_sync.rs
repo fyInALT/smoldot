@@ -188,6 +188,28 @@ pub enum InProgressWarpSync<TSrc> {
 }
 
 impl<TSrc> WarpSync<TSrc> {
+    fn from_aura_get(
+        chain_information: ValidChainInformation,
+        runtime: HostVmPrototype,
+        mut state: PostVerificationState<TSrc>,
+        post_download: PostRuntimeDownloadState,
+    ) -> (Self, Option<Error>) {
+        (
+            WarpSync::Finished(Success {
+                chain_information,
+                finalized_runtime: runtime,
+                finalized_storage_code: post_download.finalized_storage_code,
+                finalized_storage_heap_pages: post_download.finalized_storage_heap_pages,
+                sources: state
+                    .sources
+                    .drain()
+                    .map(|source| source.user_data)
+                    .collect(),
+            }),
+            None,
+        )
+    }
+
     fn from_babe_fetch_epoch_query(
         mut query: babe_fetch_epoch::Query,
         mut fetched_current_epoch: Option<BabeEpochInformation>,
@@ -946,6 +968,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         heap_pages: Option<impl AsRef<[u8]>>,
         exec_hint: ExecHint,
         allow_unresolved_imports: bool,
+        chain_information: Option<ValidChainInformation>,
     ) -> (WarpSync<TSrc>, Option<Error>) {
         let code = match code {
             Some(code) => code.as_ref().to_vec(),
@@ -989,23 +1012,38 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
             allow_unresolved_imports,
         }) {
             Ok(runtime) => {
-                let babe_current_epoch_query =
-                    babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                // Use aura check
+                match chain_information {
+                    Some(chain_information) => WarpSync::from_aura_get(
+                        chain_information,
                         runtime,
-                        epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
-                    });
+                        self.state,
+                        PostRuntimeDownloadState {
+                            finalized_storage_code: Some(code),
+                            finalized_storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
+                        },
+                    ),
+                    None => {
+                        let babe_current_epoch_query =
+                            babe_fetch_epoch::babe_fetch_epoch(babe_fetch_epoch::Config {
+                                runtime,
+                                epoch_to_fetch: babe_fetch_epoch::BabeEpochToFetch::CurrentEpoch,
+                            });
 
-                let (warp_sync, error) = WarpSync::from_babe_fetch_epoch_query(
-                    babe_current_epoch_query,
-                    None,
-                    self.state,
-                    PostRuntimeDownloadState {
-                        finalized_storage_code: Some(code),
-                        finalized_storage_heap_pages: heap_pages.map(|hp| hp.as_ref().to_vec()),
-                    },
-                );
+                        let (warp_sync, error) = WarpSync::from_babe_fetch_epoch_query(
+                            babe_current_epoch_query,
+                            None,
+                            self.state,
+                            PostRuntimeDownloadState {
+                                finalized_storage_code: Some(code),
+                                finalized_storage_heap_pages: heap_pages
+                                    .map(|hp| hp.as_ref().to_vec()),
+                            },
+                        );
 
-                (warp_sync, error)
+                        (warp_sync, error)
+                    }
+                }
             }
             Err(error) => (
                 WarpSync::InProgress(InProgressWarpSync::warp_sync_request_from_next_source(

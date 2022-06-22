@@ -482,6 +482,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             (valid_list, invalid_list)
         };
 
+        log::info!("bootstrap_nodes {:?}", bootstrap_nodes);
+
         // All the checks are performed above. Adding the chain can't fail anymore at this point.
 
         // Grab a couple of fields from the chain specification for later, as the chain
@@ -510,6 +512,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             protocol_id: chain_spec.protocol_id().to_owned(),
         };
 
+        log::info!("start relay_chain_ready_future");
+
         // If the chain we are adding is a parachain, grab the services of the relay chain.
         //
         // Since the initialization process of a chain is done asynchronously, it is possible that
@@ -536,6 +540,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
 
                 (future, relay_chain.log_name.clone())
             });
+
+        log::info!("start log_name");
 
         // Determinate the name under which the chain will be identified in the logs.
         // Because the chain spec is untrusted input, we must transform the `id` to remove all
@@ -575,6 +581,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             }
         };
 
+        log::info!("start services");
+
         // Start the services of the chain to add, or grab the services if they already exist.
         let (services_init, log_name) = match self.chains_by_key.entry(new_chain_key.clone()) {
             Entry::Occupied(mut entry) => {
@@ -591,14 +599,20 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 // peer-to-peer network.
                 let network_noise_key = connection::NoiseKey::new(&rand::random());
 
+                log::info!("network_noise_key");
+
                 // Spawn a background task that initializes the services of the new chain and
                 // yields a `ChainServices`.
                 let running_chain_init_future: future::RemoteHandle<ChainServices<TPlat>> = {
+                    log::info!("running_chain_init start");
+
                     let new_tasks_tx = self.new_task_tx.clone();
                     let chain_spec = chain_spec.clone(); // TODO: quite expensive
                     let log_name = log_name.clone();
 
                     let future = async move {
+                        log::info!("running_chain_init running start");
+
                         // Wait until the relay chain has finished initializing, if necessary.
                         let relay_chain =
                             if let Some((mut relay_chain_ready_future, relay_chain_log_name)) =
@@ -621,6 +635,9 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                         let starting_block_hash =
                             chain_information.as_ref().finalized_block_header.hash();
 
+                        log::info!("running_chain_init start_services");
+
+
                         let running_chain = start_services(
                             log_name.clone(),
                             new_tasks_tx,
@@ -631,6 +648,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                             network_noise_key,
                         )
                         .await;
+
+                        log::info!("running_chain_init start_services end");
 
                         // Note that the chain name is printed through the `Debug` trait (rather
                         // than `Display`) because it is an untrusted user input.
@@ -690,6 +709,8 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
             }
         };
 
+        log::info!("invalid_bootstrap_nodes_sanitized");
+
         if !invalid_bootstrap_nodes_sanitized.is_empty() {
             log::warn!(
                 target: "smoldot",
@@ -722,6 +743,7 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         // task that waits for the chain initialization to finish then adds the nodes.
         self.new_task_tx
             .unbounded_send(("network-service-add-bootnodes".to_owned(), {
+                log::info!("network-service-add-bootnodes");
                 // Clone `running_chain_init`.
                 let mut running_chain_init = match services_init {
                     future::MaybeDone::Done(d) => future::MaybeDone::Done(d.clone()),
@@ -995,6 +1017,9 @@ async fn start_services<TPlat: Platform>(
     relay_chain: Option<&ChainServices<TPlat>>,
     network_noise_key: connection::NoiseKey,
 ) -> ChainServices<TPlat> {
+
+    log::info!("start_services start");
+
     // Since `network_noise_key` is moved out below, use it to build the network identity ahead
     // of the network service starting.
     let network_identity =

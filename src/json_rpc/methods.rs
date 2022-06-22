@@ -108,7 +108,7 @@ pub enum MethodError<'a> {
     },
     /// One of the parameters of the function call is invalid.
     #[display(
-        fmt = "Parameter #{} is invalid when calling {}: {}",
+        fmt = "Parameter of index {} is invalid when calling {}: {}",
         parameter_index,
         rpc_method,
         error
@@ -146,10 +146,6 @@ impl<'a> MethodError<'a> {
         )
     }
 }
-
-/// Could not parse the body of the message as a valid JSON-RPC message.
-#[derive(Debug, derive_more::Display)]
-pub struct JsonRpcParseError(serde_json::Error);
 
 /// The parameter of a function call is invalid.
 #[derive(Debug, derive_more::Display)]
@@ -369,7 +365,7 @@ define_methods! {
     payment_queryInfo(extrinsic: HexString, hash: Option<HashHexString>) -> RuntimeDispatchInfo,
     /// Returns a list of all JSON-RPC methods that are available.
     rpc_methods() -> RpcMethods,
-    state_call() -> () [state_callAt], // TODO:
+    state_call(name: Cow<'a, str>, parameters: HexString, hash: Option<HashHexString>) -> HexString [state_callAt],
     state_getKeys() -> (), // TODO:
     state_getKeysPaged(prefix: Option<HexString>, count: u32, start_key: Option<HexString>, hash: Option<HashHexString>) -> Vec<HexString> [state_getKeysPagedAt],
     state_getMetadata(hash: Option<HashHexString>) -> HexString,
@@ -392,7 +388,7 @@ define_methods! {
     system_dryRun() -> () [system_dryRunAt], // TODO:
     system_health() -> SystemHealth,
     system_localListenAddresses() -> Vec<String>,
-    /// Returns the base58 encoding of the network identity of the node on the peer-to-peer network.
+    /// Returns the Base58 encoding of the network identity of the node on the peer-to-peer network.
     system_localPeerId() -> Cow<'a, str>,
     /// Returns, as an opaque string, the name of the client serving these JSON-RPC requests.
     system_name() -> Cow<'a, str>,

@@ -26,6 +26,7 @@ use hashbrown::HashMap;
 /// Error that can happen when deserializing the data.
 #[derive(Debug, derive_more::Display)]
 pub(super) enum DeserializeError {
+    #[display(fmt = "Failed to decode header: {}", _0)]
     Header(header::Error),
     ConsensusAlgorithmsMismatch,
     /// Some Babe-related information is missing.
@@ -263,7 +264,10 @@ impl SerializedChainInformationV1 {
             },
         };
 
-        // TODO: consider checking integrity of the storage against the header
+        // We could in principle check the integrity of the storage against the state root hash
+        // in the header. However, doing so would require obtaining the state version from the
+        // runtime, which would be very CPU intensive. Checking the integrity of the storage isn't
+        // a bad idea, but it would be inappropriate to do so in the decoding code.
         let finalized_storage = self.finalized_storage.map(|storage| {
             storage
                 .into_iter()

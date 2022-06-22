@@ -87,7 +87,7 @@ pub fn decode_persisted_validation_data_return_value(
 
 /// Error that can happen during the decoding.
 #[derive(Debug, derive_more::Display)]
-#[display(fmt = "Error during the persisted validation data decoding")]
+#[display(fmt = "Error decoding persisted validation data")]
 pub struct Error(nom::error::ErrorKind);
 
 /// Decoded persisted validation data.
@@ -106,7 +106,7 @@ pub struct PersistedValidationDataRef<'a> {
     pub max_pov_size: u32,
 }
 
-/// Nom combinator that parses a [`PersistedValidationDataRef`].
+/// `Nom` combinator that parses a [`PersistedValidationDataRef`].
 fn persisted_validation_data<'a, E: nom::error::ParseError<&'a [u8]>>(
     bytes: &'a [u8],
 ) -> nom::IResult<&'a [u8], PersistedValidationDataRef, E> {

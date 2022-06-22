@@ -18,7 +18,7 @@
 //! General-purpose WebAssembly virtual machine.
 //!
 //! Contains code related to running a WebAssembly virtual machine. Contrary to
-//! (`HostVm`)[super::host::HostVm], this module isn't aware of any of the host
+//! (`HostVm`)[`super::host::HostVm`], this module isn't aware of any of the host
 //! functions available to Substrate runtimes. It only contains the code required to run a virtual
 //! machine, with some adjustments explained below.
 //!
@@ -111,9 +111,12 @@ impl Module {
                 ExecHint::CompileAheadOfTime => {
                     ModuleInner::Interpreter(interpreter::Module::new(module)?)
                 }
-                ExecHint::Oneshot | ExecHint::Untrusted => {
+                ExecHint::Oneshot | ExecHint::Untrusted | ExecHint::ForceWasmi => {
                     ModuleInner::Interpreter(interpreter::Module::new(module)?)
                 }
+
+                #[cfg(all(target_arch = "x86_64", feature = "std"))]
+                ExecHint::ForceWasmtime => ModuleInner::Jit(jit::Module::new(module)?),
             },
         })
     }
@@ -344,11 +347,37 @@ pub enum ExecHint {
     Oneshot,
     /// The WebAssembly code running through this VM is untrusted.
     Untrusted,
+
+    /// Forces using the `wasmi` backend.
+    ///
+    /// This variant is useful for testing purposes.
+    ForceWasmi,
+    /// Forces using the `wasmtime` backend.
+    ///
+    /// This variant is useful for testing purposes.
+    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg_attr(docsrs, doc(cfg(all(target_arch = "x86_64", feature = "std"))))]
+    ForceWasmtime,
+}
+
+impl ExecHint {
+    /// Returns `ForceWasmtime` if it is available on the current platform, and `None` otherwise.
+    pub fn force_wasmtime_if_available() -> Option<ExecHint> {
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        fn value() -> Option<ExecHint> {
+            Some(ExecHint::ForceWasmtime)
+        }
+        #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+        fn value() -> Option<ExecHint> {
+            None
+        }
+        value()
+    }
 }
 
 /// Number of heap pages available to the Wasm code.
 ///
-/// Each page is 64kiB.
+/// Each page is `64kiB`.
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, derive_more::Add, derive_more::Sub,
 )]
@@ -641,6 +670,11 @@ pub enum NewErr {
         /// Name of module associated with the unresolved function.
         module_name: String,
     },
+    /// Smoldot doesn't support wasm runtime that have a start function. It is unclear whether
+    /// this is allowed in the Substrate/Polkadot specification.
+    #[display(fmt = "Start function not supported")]
+    // TODO: figure this out
+    StartFunctionNotSupported,
     /// If a "memory" symbol is provided, it must be a memory.
     #[display(fmt = "If a \"memory\" symbol is provided, it must be a memory.")]
     MemoryIsntMemory,
@@ -650,7 +684,7 @@ pub enum NewErr {
     NoMemory,
     /// Wasm module both imports and exports a memory.
     TwoMemories,
-    /// If a "__indirect_function_table" symbol is provided, it must be a table.
+    /// If a `__indirect_function_table` symbol is provided, it must be a table.
     #[display(fmt = "If a \"__indirect_function_table\" symbol is provided, it must be a table.")]
     IndirectTableIsntTable,
     /// Failed to allocate memory for the virtual machine.

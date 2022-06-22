@@ -54,7 +54,7 @@
 //! large, the subscription is force-killed by the [`RuntimeService`].
 //!
 
-use crate::{sync_service, Platform};
+use crate::{network_service, sync_service, Platform};
 
 use futures::{
     channel::mpsc,
@@ -72,7 +72,7 @@ use smoldot::{
 use std::{
     collections::BTreeMap,
     iter, mem,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     pin::Pin,
     sync::{Arc, Weak},
     time::Duration,
@@ -182,11 +182,12 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     /// Only up to `buffer_size` block notifications are buffered in the channel. If the channel
     /// is full when a new notification is attempted to be pushed, the channel gets closed.
     ///
-    /// A maximum number of pinned blocks must be passed, indicating the maximum number of blocks
-    /// that the runtime service will pin at the same time for this subscription. If this maximum
-    /// is reached, the channel will get closed. In situations where the subscriber is guaranteed
-    /// to always properly unpin blocks, a value of `usize::max_value()` can be passed in order
-    /// to ignore this maximum.
+    /// A maximum number of finalized or non-canonical (i.e. not part of the finalized chain)
+    /// pinned blocks must be passed, indicating the maximum number of blocks that are finalized
+    /// or non-canonical that the runtime service will pin at the same time for this subscription.
+    /// If this maximum is reached, the channel will get closed. In situations where the subscriber
+    /// is guaranteed to always properly unpin blocks, a value of  `usize::max_value()` can be
+    /// passed in order to ignore this maximum.
     ///
     /// The channel also gets closed if a gap in the finality happens, such as after a Grandpa
     /// warp syncing.
@@ -195,7 +196,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
     pub async fn subscribe_all(
         &self,
         buffer_size: usize,
-        max_pinned_blocks: usize,
+        max_pinned_blocks: NonZeroUsize,
     ) -> SubscribeAll<TPlat> {
         // First, lock `guarded` and wait for the tree to be in `FinalizedBlockRuntimeKnown` mode.
         // This can take a long time.
@@ -231,7 +232,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 _ => unreachable!(),
             };
 
-        let (mut tx, new_blocks_channel) = mpsc::channel(buffer_size);
+        let (tx, new_blocks_channel) = mpsc::channel(buffer_size);
         let subscription_id = guarded_lock.next_subscription_id;
         guarded_lock.next_subscription_id += 1;
 
@@ -243,6 +244,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                 tree.finalized_async_user_data().clone(),
                 *decoded_finalized_block.state_root,
                 decoded_finalized_block.number,
+                false,
             ),
         );
 
@@ -278,6 +280,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
                     runtime.clone(),
                     *decoded_header.state_root,
                     decoded_header.number,
+                    true,
                 ),
             );
 
@@ -307,25 +310,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             0 | 1
         ));
 
-        // If the requested maximum number of pinned blocks is too low, we pretend that this
-        // maximum number was just enough by insert `0` remaining pinned blocks, but we also close
-        // the subscription immediately to mimic the effects of not having enough pinned blocks
-        // remaining.
-        //
-        // It could also in principle be possible to not insert in `all_blocks_subscriptions` at,
-        // all but this would require cleaning up all the other modifications we've done to
-        // guarded`. By inserting a closed channel, we reuse the same code as the one that purges
-        // closed channels.
-        all_blocks_subscriptions.insert(subscription_id, {
-            if let Some(pinned_remaining) =
-                max_pinned_blocks.checked_sub(1 + non_finalized_blocks_ancestry_order.len())
-            {
-                (tx, pinned_remaining)
-            } else {
-                tx.close_channel();
-                (tx, 0)
-            }
-        });
+        all_blocks_subscriptions.insert(subscription_id, (tx, max_pinned_blocks.get() - 1));
 
         SubscribeAll {
             finalized_block_scale_encoded_header: finalized_block.scale_encoded_header.clone(),
@@ -373,24 +358,27 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
             ..
         } = &mut guarded_lock.tree
         {
-            if pinned_blocks
-                .remove(&(subscription_id.0, *block_hash))
-                .is_none()
-            {
-                // Cold path.
-                if all_blocks_subscriptions.contains_key(&subscription_id.0) {
-                    panic!("block already unpinned");
-                } else {
-                    return;
-                }
-            };
+            let block_counts_towards_limit =
+                match pinned_blocks.remove(&(subscription_id.0, *block_hash)) {
+                    Some((_, _, _, to_remove)) => !to_remove,
+                    None => {
+                        // Cold path.
+                        if all_blocks_subscriptions.contains_key(&subscription_id.0) {
+                            panic!("block already unpinned");
+                        } else {
+                            return;
+                        }
+                    }
+                };
 
             guarded_lock.runtimes.retain(|_, rt| rt.strong_count() > 0);
 
-            let (_, pinned_remaining) = all_blocks_subscriptions
-                .get_mut(&subscription_id.0)
-                .unwrap();
-            *pinned_remaining += 1;
+            if block_counts_towards_limit {
+                let (_, finalized_pinned_remaining) = all_blocks_subscriptions
+                    .get_mut(&subscription_id.0)
+                    .unwrap();
+                *finalized_pinned_remaining += 1;
+            }
         } else {
             panic!("Invalid subscription")
         }
@@ -414,7 +402,7 @@ impl<TPlat: Platform> RuntimeService<TPlat> {
         let mut guarded = self.guarded.lock().await;
         let guarded = &mut *guarded;
 
-        let (runtime, block_state_root_hash, block_number) = {
+        let (runtime, block_state_root_hash, block_number, _) = {
             if let GuardedInner::FinalizedBlockRuntimeKnown { pinned_blocks, .. } =
                 &mut guarded.tree
             {
@@ -587,7 +575,7 @@ impl<TPlat: Platform> Subscription<TPlat> {
 pub enum Notification {
     /// A non-finalized block has been finalized.
     Finalized {
-        /// Blake2 hash of the header of the block that has been finalized.
+        /// BLAKE2 hash of the header of the block that has been finalized.
         ///
         /// A block with this hash is guaranteed to have earlier been reported in a
         /// [`BlockNotification`], either in [`SubscribeAll::non_finalized_blocks_ancestry_order`]
@@ -612,7 +600,7 @@ pub enum Notification {
         /// or in a [`Notification::Block`].
         best_block_hash: [u8; 32],
 
-        /// List of blake2 hashes of the headers of the blocks that have been discarded because
+        /// List of BLAKE2 hashes of the headers of the blocks that have been discarded because
         /// they're not descendants of the newly-finalized block.
         ///
         /// This list contains all the siblings of the newly-finalized block and all their
@@ -635,7 +623,7 @@ pub struct BlockNotification {
     /// SCALE-encoded header of the block.
     pub scale_encoded_header: Vec<u8>,
 
-    /// Blake2 hash of the header of the parent of this block.
+    /// BLAKE2 hash of the header of the parent of this block.
     ///
     ///
     /// A block with this hash is guaranteed to have earlier been reported in a
@@ -764,7 +752,7 @@ impl<'a, TPlat: Platform> RuntimeLock<'a, TPlat> {
 pub struct RuntimeCallLock<'a> {
     guarded: MutexGuard<'a, Option<executor::host::HostVmPrototype>>,
     block_state_root_hash: [u8; 32],
-    call_proof: Result<Vec<Vec<u8>>, RuntimeCallError>,
+    call_proof: Result<network_service::EncodedMerkleProof, RuntimeCallError>,
 }
 
 impl<'a> RuntimeCallLock<'a> {
@@ -780,7 +768,7 @@ impl<'a> RuntimeCallLock<'a> {
     // TODO: if proof is invalid, we should give the option to fetch another call proof
     pub fn storage_entry(&self, requested_key: &[u8]) -> Result<Option<&[u8]>, RuntimeCallError> {
         let call_proof = match &self.call_proof {
-            Ok(p) => p,
+            Ok(p) => p.decode(),
             Err(err) => return Err(err.clone()),
         };
 
@@ -810,7 +798,7 @@ impl<'a> RuntimeCallLock<'a> {
         let mut output = Vec::new();
 
         let call_proof = match &self.call_proof {
-            Ok(p) => p,
+            Ok(p) => p.decode(),
             Err(err) => return Err(err.clone()),
         };
 
@@ -822,7 +810,11 @@ impl<'a> RuntimeCallLock<'a> {
             })
             .map_err(RuntimeCallError::StorageRetrieval)?;
 
-            if node_info.storage_value.is_some() {
+            if matches!(
+                node_info.storage_value,
+                proof_verify::StorageValue::Known(_)
+                    | proof_verify::StorageValue::HashKnownValueMissing(_)
+            ) {
                 assert_eq!(key.len() % 2, 0);
                 output.push(trie::nibbles_to_bytes_extend(key.iter().copied()).collect::<Vec<_>>());
             }
@@ -875,8 +867,8 @@ impl<'a> Drop for RuntimeCallLock<'a> {
 // TODO: clean up these errors
 #[derive(Debug, Clone, derive_more::Display)]
 pub enum RuntimeCallError {
-    /// Runtime of the best block isn't valid.
-    #[display(fmt = "Runtime of the best block isn't valid: {}", _0)]
+    /// Runtime of the block isn't valid.
+    #[display(fmt = "Runtime of the block isn't valid: {}", _0)]
     InvalidRuntime(RuntimeError),
     /// Error while retrieving the storage item from other nodes.
     // TODO: change error type?
@@ -911,10 +903,13 @@ pub enum RuntimeError {
     /// The `:code` key of the storage is empty.
     CodeNotFound,
     /// Error while parsing the `:heappages` storage value.
+    #[display(fmt = "Failed to parse `:heappages` storage value: {}", _0)]
     InvalidHeapPages(executor::InvalidHeapPagesError),
     /// Error while compiling the runtime.
+    #[display(fmt = "{}", _0)]
     Build(executor::host::NewErr),
     /// Error when determining the runtime specification.
+    #[display(fmt = "Error determining runtime version: {}", _0)]
     CoreVersion(executor::CoreVersionError),
 }
 
@@ -959,7 +954,7 @@ enum GuardedInner<TPlat: Platform> {
 
         /// List of senders that get notified when new blocks arrive.
         /// See [`RuntimeService::subscribe_all`]. Alongside with each sender, the number of pinned
-        /// blocks remaining for this subscription.
+        /// finalized or non-canonical blocks remaining for this subscription.
         ///
         /// Keys are assigned from [`Guarded::next_subscription_id`].
         all_blocks_subscriptions:
@@ -973,9 +968,10 @@ enum GuardedInner<TPlat: Platform> {
         /// blocks from this container that are no longer relevant.
         ///
         /// Keys are `(subscription_id, block_hash)`. Values are indices within
-        /// [`Guarded::runtimes`], state trie root hashes, and block numbers.
+        /// [`Guarded::runtimes`], state trie root hashes, block numbers, and whether the block
+        /// is non-finalized and part of the canonical chain.
         // TODO: use structs instead of tuples
-        pinned_blocks: BTreeMap<(u64, [u8; 32]), (Arc<Runtime>, [u8; 32], u64)>,
+        pinned_blocks: BTreeMap<(u64, [u8; 32]), (Arc<Runtime>, [u8; 32], u64, bool)>,
     },
     FinalizedBlockRuntimeUnknown {
         /// Tree of blocks. Holds the state of the download of everything. Always `Some` when the
@@ -1351,7 +1347,9 @@ async fn run_background<TPlat: Platform>(
 
 #[derive(Debug, Clone, derive_more::Display)]
 enum RuntimeDownloadError {
+    #[display(fmt = "{}", _0)]
     StorageQuery(sync_service::StorageQueryError),
+    #[display(fmt = "Couldn't decode header: {}", _0)]
     InvalidHeader(header::Error),
 }
 
@@ -1488,16 +1486,37 @@ impl<TPlat: Platform> Background<TPlat> {
                         let all_blocks_notif = Notification::Finalized {
                             best_block_hash,
                             hash: finalized_block.hash,
-                            pruned_blocks: pruned_blocks
-                                .into_iter()
-                                .map(|(_, b, _)| b.hash)
-                                .collect(),
+                            pruned_blocks: pruned_blocks.iter().map(|(_, b, _)| b.hash).collect(),
                         };
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut() {
+                        for (subscription_id, (sender, finalized_pinned_remaining)) in
+                            all_blocks_subscriptions.iter_mut()
+                        {
+                            let count_limit = pruned_blocks.len() + 1;
+
+                            if *finalized_pinned_remaining < count_limit {
+                                to_remove.push(*subscription_id);
+                                continue;
+                            }
+
                             if sender.try_send(all_blocks_notif.clone()).is_err() {
                                 to_remove.push(*subscription_id);
+                                continue;
+                            }
+
+                            *finalized_pinned_remaining -= count_limit;
+
+                            // Mark the finalized and pruned blocks as finalized or non-canonical.
+                            for block in iter::once(&finalized_block.hash)
+                                .chain(pruned_blocks.iter().map(|(_, b, _)| &b.hash))
+                            {
+                                if let Some((_, _, _, non_finalized_canonical)) =
+                                    pinned_blocks.get_mut(&(*subscription_id, *block))
+                                {
+                                    debug_assert!(*non_finalized_canonical);
+                                    *non_finalized_canonical = false;
+                                }
                             }
                         }
                         for to_remove in to_remove {
@@ -1556,19 +1575,16 @@ impl<TPlat: Platform> Background<TPlat> {
                         });
 
                         let mut to_remove = Vec::new();
-                        for (subscription_id, (sender, pinned_remaining)) in
-                            all_blocks_subscriptions.iter_mut()
-                        {
-                            if *pinned_remaining == 0 {
-                                to_remove.push(*subscription_id);
-                                continue;
-                            }
-
+                        for (subscription_id, (sender, _)) in all_blocks_subscriptions.iter_mut() {
                             if sender.try_send(notif.clone()).is_ok() {
-                                *pinned_remaining -= 1;
                                 pinned_blocks.insert(
                                     (*subscription_id, block_hash),
-                                    (block_runtime.clone(), block_state_root_hash, block_number),
+                                    (
+                                        block_runtime.clone(),
+                                        block_state_root_hash,
+                                        block_number,
+                                        true,
+                                    ),
                                 );
                             } else {
                                 to_remove.push(*subscription_id);

@@ -25,40 +25,95 @@ fn is_send() {
     test::<super::VirtualMachinePrototype>();
 }
 
-// TODO: test below should run for both wasmi and wasmtime
-
 #[test]
 fn basic_seems_to_work() {
-    let module = super::Module::new(
-        &include_bytes!("./test-polkadot-runtime-v9160.wasm")[..],
-        super::ExecHint::CompileAheadOfTime,
-    )
-    .unwrap();
-
-    let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
-
-    // Note that this test doesn't test much, as anything elaborate would require implementing
-    // the Substrate/Polkadot allocator.
-
-    let mut vm = prototype
-        .start(
-            super::HeapPages::new(1024),
-            "Core_version",
-            &[super::WasmValue::I32(0), super::WasmValue::I32(0)],
+    fn test(exec_hint: super::ExecHint) {
+        let module = super::Module::new(
+            &include_bytes!("./test-polkadot-runtime-v9160.wasm")[..],
+            exec_hint,
         )
         .unwrap();
 
-    loop {
-        match vm.run(None) {
-            Ok(super::ExecOutcome::Finished {
-                return_value: Ok(_),
-            }) => break,
-            Ok(super::ExecOutcome::Finished {
-                return_value: Err(_),
-            }) => panic!(),
-            Ok(super::ExecOutcome::Interrupted { id: 0, .. }) => break,
-            Ok(super::ExecOutcome::Interrupted { .. }) => panic!(),
-            Err(_) => panic!(),
+        let prototype = super::VirtualMachinePrototype::new(&module, |_, _, _| Ok(0)).unwrap();
+
+        // Note that this test doesn't test much, as anything elaborate would require implementing
+        // the Substrate/Polkadot allocator.
+
+        let mut vm = prototype
+            .start(
+                super::HeapPages::new(1024),
+                "Core_version",
+                &[super::WasmValue::I32(0), super::WasmValue::I32(0)],
+            )
+            .unwrap();
+
+        loop {
+            match vm.run(None) {
+                Ok(super::ExecOutcome::Finished {
+                    return_value: Ok(_),
+                }) => break,
+                Ok(super::ExecOutcome::Finished {
+                    return_value: Err(_),
+                }) => panic!(),
+                Ok(super::ExecOutcome::Interrupted { id: 0, .. }) => break,
+                Ok(super::ExecOutcome::Interrupted { .. }) => panic!(),
+                Err(_) => panic!(),
+            }
         }
+    }
+
+    test(super::ExecHint::ForceWasmi);
+    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
+        test(exec_hint);
+    }
+}
+
+#[test]
+fn out_of_memory_access() {
+    let input = [
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x00, 0x0b, 0x06,
+        0x01, 0x00, 0x41, 0x03, 0x0b, 0x00,
+    ];
+
+    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
+        let module1 = super::Module::new(input, exec_hint).unwrap();
+        assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+    }
+
+    let module2 = super::Module::new(input, super::ExecHint::ForceWasmi).unwrap();
+    assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
+}
+
+#[test]
+fn has_start_function() {
+    let input = [
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02,
+        0x09, 0x01, 0x01, 0x71, 0x03, 0x69, 0x6d, 0x70, 0x00, 0x00, 0x08, 0x01, 0x00,
+    ];
+
+    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
+        let module1 = super::Module::new(input, exec_hint).unwrap();
+        assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+    }
+
+    let module2 = super::Module::new(input, super::ExecHint::ForceWasmi).unwrap();
+    assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
+}
+
+#[test]
+fn unsupported_type() {
+    let input = [
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b,
+        0x02, 0x0d, 0x01, 0x04, 0x74, 0x65, 0x73, 0x74, 0x04, 0x66, 0x75, 0x6e, 0x63, 0x00, 0x00,
+    ];
+
+    if let Some(exec_hint) = super::ExecHint::force_wasmtime_if_available() {
+        if let Ok(module1) = super::Module::new(input, exec_hint) {
+            assert!(super::VirtualMachinePrototype::new(&module1, |_, _, _| Ok(0)).is_err());
+        }
+    }
+
+    if let Ok(module2) = super::Module::new(input, super::ExecHint::ForceWasmi) {
+        assert!(super::VirtualMachinePrototype::new(&module2, |_, _, _| Ok(0)).is_err());
     }
 }

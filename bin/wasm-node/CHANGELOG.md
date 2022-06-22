@@ -4,6 +4,54 @@
 
 ### Changed
 
+- When a database and a chain specification checkpoint are both provided to `addChain`, the block in the database is used only if it has a higher block number than the block in the chain specification checkpoint. This makes it possible to bypass issues where smoldot is incapable of syncing over a certain block by updating the chain specification, without having to manually clear existing databases. ([#2401](https://github.com/paritytech/smoldot/pull/2401))
+
+### Fixed
+
+- Fix errors about verifying justifications. Justifications and Grandpa commits that can't be verified yet are now properly stored in memory in order to be verified later, instead of producing errors. ([#2400](https://github.com/paritytech/smoldot/pull/2400))
+- Fix issue where unverified justifications would overwrite one another, meaning that an invalid justification could potentially prevent a valid justification from being taken into account. ([#2400](https://github.com/paritytech/smoldot/pull/2400))
+
+## 0.6.19 - 2022-06-14
+
+### Fixed
+
+- Fix panic introduced in v0.6.18 in case of a fork in the chain related to tracking the number of blocks kept alive in the node's memory. ([#2386](https://github.com/paritytech/smoldot/pull/2386))
+
+## 0.6.18 - 2022-06-14
+
+### Added
+
+- Add support for the `state_call` JSON-RPC function. ([#2374](https://github.com/paritytech/smoldot/pull/2374))
+- The `relay_chain` and `para_id` fields in chain specifications can now alternatively be named respectively `relayChain` and `paraId`. This increases consistency with the other fields of chain specifications, which are all camelCase. ([#2366](https://github.com/paritytech/smoldot/pull/2366))
+
+### Fixed
+
+- Fix another panic in case of a carefully-crafted LEB128 length. ([#2337](https://github.com/paritytech/smoldot/pull/2337))
+- Fix a panic when decoding a block header containing a large number of Aura authorities. ([#2338](https://github.com/paritytech/smoldot/pull/2338))
+- Fix multiple panics when decoding network messages in case where these messages were truncated. ([#2340](https://github.com/paritytech/smoldot/pull/2340), [#2355](https://github.com/paritytech/smoldot/pull/2355))
+- Fix panic when the Kademlia random discovery process initiates a request on a connection that has just started shutting down. ([#2369](https://github.com/paritytech/smoldot/pull/2369))
+- Fix subscriptions to `chainHead_unstable_follow` being immediately shut down if the gap between the finalized block and the best block is above a certain threshold. This could lead to loops where the JSON-RPC client tries to re-open a subscription, only for it to be immediately shut down again.
+
+## 0.6.17 - 2022-05-31
+
+### Changed
+
+- The networking code has been considerably refactored. Due to the large size of the change it is possible that unintended changes in behaviour have been introduced. ([#2264](https://github.com/paritytech/smoldot/pull/2264))
+
+### Fixed
+
+- Fix a panic in case of a Noise message with an invalid length. ([#2321](https://github.com/paritytech/smoldot/pull/2321))
+- Fix a panic in case of a carefully-crafted LEB128 length. ([#2326](https://github.com/paritytech/smoldot/pull/2326))
+
+## 0.6.16 - 2022-05-16
+
+### Added
+
+- Added support for version 1 of the trie. Previously, it wasn't possible to connect to chains that were using version 1. ([#2277](https://github.com/paritytech/smoldot/pull/2277))
+
+### Changed
+
+- The runtime of the genesis block is now only compiled once when a chain is added, decreasing the time this operation takes. ([#2270](https://github.com/paritytech/smoldot/pull/2270))
 - Block announces are now propagated to other peers that are also light clients. Light clients should try to connect to as few full nodes as possible (to save resources), but doing so can leave them vulnerable to eclipse attacks. By having light clients connect to other light clients and making them gossip block announces to each other, we increase the likelihood that they detect situations where a given validator generates two blocks during the same slot and is trying to show one of the block only to some peers and the other block to the rest. ([#2226](https://github.com/paritytech/smoldot/pull/2226))
 
 ## 0.6.15 - 2022-04-07

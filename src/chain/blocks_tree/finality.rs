@@ -115,12 +115,12 @@ impl<T> NonFinalizedTree<T> {
     /// be used to apply the finalization.
     pub fn verify_grandpa_commit_message(
         &mut self,
-        scale_encoded_message: &[u8],
+        scale_encoded_commit: &[u8],
     ) -> Result<FinalityApply<T>, CommitVerifyError> {
         self.inner
             .as_mut()
             .unwrap()
-            .verify_grandpa_commit_message(scale_encoded_message)
+            .verify_grandpa_commit_message(scale_encoded_commit)
     }
 
     /// Sets the latest known finalized block. Trying to verify a block that isn't a descendant of
@@ -339,15 +339,16 @@ impl<T> NonFinalizedTreeInner<T> {
     /// See [`NonFinalizedTree::verify_grandpa_commit_message`].
     fn verify_grandpa_commit_message(
         &mut self,
-        scale_encoded_message: &[u8],
+        verify_grandpa_commit_message: &[u8],
     ) -> Result<FinalityApply<T>, CommitVerifyError> {
         // The code below would panic if the chain doesn't use Grandpa.
         if !matches!(self.finality, Finality::Grandpa { .. }) {
             return Err(CommitVerifyError::NotGrandpa);
         }
 
-        let decoded_commit = grandpa::commit::decode::decode_grandpa_commit(scale_encoded_message)
-            .map_err(|_| CommitVerifyError::InvalidCommit)?;
+        let decoded_commit =
+            grandpa::commit::decode::decode_grandpa_commit(verify_grandpa_commit_message)
+                .map_err(|_| CommitVerifyError::InvalidCommit)?;
 
         // Delegate the first step to the other function.
         let (block_index, expected_authorities_set_id, authorities_list) = self
@@ -358,7 +359,7 @@ impl<T> NonFinalizedTreeInner<T> {
             .map_err(CommitVerifyError::FinalityVerify)?;
 
         let mut verification = grandpa::commit::verify::verify(grandpa::commit::verify::Config {
-            commit: scale_encoded_message,
+            commit: verify_grandpa_commit_message,
             expected_authorities_set_id,
             num_authorities: u32::try_from(authorities_list.clone().count()).unwrap(),
         });
@@ -373,7 +374,9 @@ impl<T> NonFinalizedTreeInner<T> {
                     });
                 }
                 grandpa::commit::verify::InProgress::FinishedUnknown => {
-                    return Err(CommitVerifyError::NotEnoughKnownBlocks)
+                    return Err(CommitVerifyError::NotEnoughKnownBlocks {
+                        target_block_number: u64::from(decoded_commit.message.target_number),
+                    })
                 }
                 grandpa::commit::verify::InProgress::Finished(Err(error)) => {
                     return Err(CommitVerifyError::VerificationFailed(error))
@@ -615,11 +618,14 @@ pub enum JustificationVerifyError {
     /// >           always returned.
     JustificationEngineMismatch,
     /// Error while decoding the justification.
+    #[display(fmt = "Error while decoding the justification: {}", _0)]
     InvalidJustification(justification::decode::Error),
     /// The justification verification has failed. The justification is invalid and should be
     /// thrown away.
+    #[display(fmt = "{}", _0)]
     VerificationFailed(justification::verify::Error),
     /// Error while verifying the finality in the context of the chain.
+    #[display(fmt = "{}", _0)]
     FinalityVerify(FinalityVerifyError),
 }
 
@@ -631,13 +637,19 @@ pub enum CommitVerifyError {
     /// Error while decoding the commit.
     InvalidCommit,
     /// Error while verifying the finality in the context of the chain.
+    #[display(fmt = "{}", _0)]
     FinalityVerify(FinalityVerifyError),
     /// Not enough blocks are known by the tree to verify this commit.
     ///
     /// This doesn't mean that the commit is bad, but that it can't be verified without adding
     /// more blocks to the tree.
-    NotEnoughKnownBlocks,
+    #[display(fmt = "Not enough blocks are known to verify this commit")]
+    NotEnoughKnownBlocks {
+        /// Block number that the commit targets.
+        target_block_number: u64,
+    },
     /// The commit verification has failed. The commit is invalid and should be thrown away.
+    #[display(fmt = "{}", _0)]
     VerificationFailed(grandpa::commit::verify::Error),
 }
 

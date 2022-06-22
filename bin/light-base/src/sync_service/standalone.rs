@@ -97,7 +97,7 @@ pub(super) async fn start_standalone_chain<TPlat: Platform>(
 
     // Main loop of the syncing logic.
     //
-    // This loop contains some CPU-heavy operations (e.g. verifying justifications and warp sync
+    // This loop contains some CPU-heavy operations (e.g. verifying finality proofs and warp sync
     // proofs) but also responding to messages sent by the foreground sync service. In order to
     // avoid long delays in responding to foreground messages, the CPU-heavy operations are split
     // into small chunks, and each iteration of the loop processes at most one of these chunks and
@@ -397,7 +397,7 @@ struct Task<TPlat: Platform> {
             (
                 all::RequestId,
                 Result<
-                    Result<Vec<protocol::BlockData>, network::service::BlocksRequestError>,
+                    Result<Vec<protocol::BlockData>, network_service::BlocksRequestError>,
                     future::Aborted,
                 >,
             ),
@@ -413,7 +413,7 @@ struct Task<TPlat: Platform> {
                 Result<
                     Result<
                         protocol::GrandpaWarpSyncResponse,
-                        network::service::GrandpaWarpSyncRequestError,
+                        network_service::GrandpaWarpSyncRequestError,
                     >,
                     future::Aborted,
                 >,
@@ -551,10 +551,11 @@ impl<TPlat: Platform> Task<TPlat> {
                     if let Ok(outcome) = storage_request.await {
                         // TODO: lots of copying around
                         // TODO: log what happens
+                        let decoded = outcome.decode();
                         keys.iter()
                             .map(|key| {
                                 proof_verify::verify_proof(proof_verify::VerifyProofConfig {
-                                    proof: outcome.iter().map(|nv| &nv[..]),
+                                    proof: decoded.iter().map(|nv| &nv[..]),
                                     requested_key: key.as_ref(),
                                     trie_root_hash: &state_trie_root,
                                 })
@@ -578,10 +579,10 @@ impl<TPlat: Platform> Task<TPlat> {
         true
     }
 
-    /// Verifies one block, or justification, or warp sync fragment, etc. that is queued for
+    /// Verifies one block, or finality proof, or warp sync fragment, etc. that is queued for
     /// verification.
     ///
-    /// Returns ̀`self` and a boolean indicating whether something has been processed.
+    /// Returns `self` and a boolean indicating whether something has been processed.
     async fn process_one_verification_queue(mut self) -> (Self, bool) {
         // Note that `process_one` moves out of `sync` and provides the value back in its
         // return value.
@@ -757,14 +758,14 @@ impl<TPlat: Platform> Task<TPlat> {
                 }
             }
 
-            all::ProcessOne::VerifyJustification(verify) => {
-                log::info!("all::ProcessOne::VerifyJustification");
-    
-                // Justification to verify.
+            all::ProcessOne::VerifyFinalityProof(verify) => {
+                log::info!("all::ProcessOne::VerifyFinalityProof");
+
+                // Finality proof to verify.
                 match verify.perform() {
                     (
                         sync,
-                        all::JustificationVerifyOutcome::NewFinalized {
+                        all::FinalityProofVerifyOutcome::NewFinalized {
                             updates_best_block,
                             finalized_blocks,
                             ..
@@ -774,7 +775,7 @@ impl<TPlat: Platform> Task<TPlat> {
 
                         log::info!(
                             target: &self.log_target,
-                            "Sync => JustificationVerified(finalized_blocks={})",
+                            "Sync => FinalityProofVerified(finalized_blocks={})",
                             finalized_blocks.len(),
                         );
 
@@ -789,10 +790,18 @@ impl<TPlat: Platform> Task<TPlat> {
                         });
                     }
 
-                    (sync, all::JustificationVerifyOutcome::Error(error)) => {
+                    (
+                        sync,
+                        all::FinalityProofVerifyOutcome::AlreadyFinalized
+                        | all::FinalityProofVerifyOutcome::GrandpaCommitPending,
+                    ) => {
+                        self.sync = sync;
+                    }
+
+                    (sync, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
                         self.sync = sync;
 
-                        // TODO: print which peer sent the justification
+                        // TODO: print which peer sent the proof
                         log::debug!(
                             target: &self.log_target,
                             "Sync => JustificationVerificationError(error={:?})",
@@ -802,6 +811,23 @@ impl<TPlat: Platform> Task<TPlat> {
                         log::warn!(
                             target: &self.log_target,
                             "Error while verifying justification: {}",
+                            error
+                        );
+                    }
+
+                    (sync, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                        self.sync = sync;
+
+                        // TODO: print which peer sent the proof
+                        log::debug!(
+                            target: &self.log_target,
+                            "Sync => GrandpaCommitVerificationError(error={:?})",
+                            error,
+                        );
+
+                        log::warn!(
+                            target: &self.log_target,
+                            "Error while verifying GrandPa commit: {}",
                             error
                         );
                     }
@@ -1001,10 +1027,10 @@ impl<TPlat: Platform> Task<TPlat> {
                             "Sync => Discarded"
                         );
                     }
-                    all::BlockAnnounceOutcome::Disjoint {} => {
+                    all::BlockAnnounceOutcome::StoredForLater {} => {
                         log::debug!(
                             target: &self.log_target,
-                            "Sync => Disjoint"
+                            "Sync => StoredForLater"
                         );
                     }
                     all::BlockAnnounceOutcome::TooOld {
@@ -1043,9 +1069,14 @@ impl<TPlat: Platform> Task<TPlat> {
 
             network_service::Event::GrandpaCommitMessage {
                 chain_index,
+                peer_id,
                 message,
             } if chain_index == self.network_chain_index => {
-                match self.sync.grandpa_commit_message(&message.as_encoded()) {
+                let sync_source_id = *self.peers_source_id_map.get(&peer_id).unwrap();
+                match self
+                    .sync
+                    .grandpa_commit_message(sync_source_id, &message.as_encoded())
+                {
                     Ok(()) => {
                         // TODO: print more details
                         log::debug!(

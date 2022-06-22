@@ -38,7 +38,7 @@ mod jaeger_service;
 mod json_rpc_service;
 mod network_service;
 
-/// Runs the node using the given configuration. Catches SIGINT signals and stops if one is
+/// Runs the node using the given configuration. Catches `SIGINT` signals and stops if one is
 /// detected.
 pub async fn run(cli_options: cli::CliOptionsRun) {
     // Determine the actual CLI output by replacing `Auto` with the actual value.
@@ -103,8 +103,15 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
             .expect("Failed to decode chain specs")
     };
 
+    // This warning message should be removed if/when the full node becomes mature.
+    tracing::warn!(
+        "Please note that this full node is experimental. It is not feature complete and is \
+        known to panic often. Please report any panic you might encounter to \
+        <https://github.com/paritytech/smoldot/issues>."
+    );
+
     // TODO: don't unwrap?
-    let genesis_chain_information = chain_spec.as_chain_information().unwrap();
+    let genesis_chain_information = chain_spec.as_chain_information().unwrap().0;
 
     // If `chain_spec` define a parachain, also load the specs of the relay chain.
     let (relay_chain_spec, _parachain_id) =
@@ -138,7 +145,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // TODO: don't unwrap?
     let relay_genesis_chain_information = relay_chain_spec
         .as_ref()
-        .map(|relay_chain_spec| relay_chain_spec.as_chain_information().unwrap());
+        .map(|relay_chain_spec| relay_chain_spec.as_chain_information().unwrap().0);
 
     let threads_pool = futures::executor::ThreadPool::builder()
         .name_prefix("tasks-pool-")
@@ -378,14 +385,16 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     // are connected to the JSON-RPC endpoint of the node while they are in reality connected to
     // something else.
     let _json_rpc_service = if let Some(bind_address) = cli_options.json_rpc_address.0 {
-        Some(
-            json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
-                tasks_executor: { &mut move |task| threads_pool.spawn_ok(task) },
-                bind_address,
-            })
-            .await
-            .unwrap(),
-        )
+        let result = json_rpc_service::JsonRpcService::new(json_rpc_service::Config {
+            tasks_executor: { &mut move |task| threads_pool.spawn_ok(task) },
+            bind_address,
+        })
+        .await;
+
+        Some(match result {
+            Ok(service) => service,
+            Err(err) => panic!("failed to initialize JSON-RPC endpoint: {}", err),
+        })
     } else {
         None
     };
@@ -490,11 +499,21 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
                 // We expect the network events channel to never shut down.
                 let network_event = network_event.unwrap();
 
-                if let network_service::Event::BlockAnnounce { chain_index: 0, header, .. } = network_event {
-                    match network_known_best {
-                        Some(n) if n >= header.number => {},
-                        _ => network_known_best = Some(header.number),
+                // Update `network_known_best`.
+                match network_event {
+                    network_service::Event::BlockAnnounce { chain_index: 0, header, .. } => {
+                        match network_known_best {
+                            Some(n) if n >= header.number => {},
+                            _ => network_known_best = Some(header.number),
+                        }
                     }
+                    network_service::Event::Connected { chain_index: 0, best_block_number, .. } => {
+                        match network_known_best {
+                            Some(n) if n >= best_block_number => {},
+                            _ => network_known_best = Some(best_block_number),
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -549,7 +568,7 @@ pub async fn run(cli_options: cli::CliOptionsRun) {
     }
 }
 
-/// Opens the database from the filesystem, or create a new database if none is found.
+/// Opens the database from the file system, or create a new database if none is found.
 ///
 /// If `tmp` is `true`, open the database in memory instead.
 ///

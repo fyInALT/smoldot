@@ -78,7 +78,13 @@ use smoldot::{
     network::protocol,
     transactions::{light_pool, validate},
 };
-use std::{cmp, iter, marker::PhantomData, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    cmp, iter,
+    marker::PhantomData,
+    num::{NonZeroU32, NonZeroUsize},
+    sync::Arc,
+    time::Duration,
+};
 
 /// Configuration for a [`TransactionsService`].
 pub struct Config<TPlat: Platform> {
@@ -256,8 +262,10 @@ pub enum DropReason {
 #[derive(Debug, derive_more::Display, Clone)]
 pub enum ValidateTransactionError {
     /// Error during the network request.
+    #[display(fmt = "{}", _0)]
     Call(runtime_service::RuntimeCallError),
     /// Error during the validation runtime call.
+    #[display(fmt = "{}", _0)]
     Validation(validate::Error),
     /// Tried to access the next key of a storage key. This isn't possible through a call request
     /// at the moment.
@@ -324,7 +332,7 @@ async fn background_task<TPlat: Platform>(
         // malicious behaviors. This code is by definition not considered malicious.
         let mut subscribe_all = worker
             .runtime_service
-            .subscribe_all(32, usize::max_value())
+            .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
             .await;
         let initial_finalized_block_hash = header::hash_from_scale_encoded_header(
             &subscribe_all.finalized_block_scale_encoded_header,
@@ -1175,7 +1183,7 @@ async fn validate_transaction<TPlat: Platform>(
     }
 }
 
-/// Utility. Calculates the blake2 hash of the given bytes.
+/// Utility. Calculates the BLAKE2 hash of the given bytes.
 fn blake2_hash(bytes: &[u8]) -> [u8; 32] {
     <[u8; 32]>::try_from(blake2_rfc::blake2b::blake2b(32, &[], bytes).as_bytes()).unwrap()
 }

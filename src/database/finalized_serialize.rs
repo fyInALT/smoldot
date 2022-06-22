@@ -20,7 +20,7 @@
 //! This module contains the [`encode_chain_storage`] and [`decode_chain`] functions that can turn
 //! a [`chain_information::ChainInformation`] into a string and back, with optionally the state of
 //! the finalized block.
-//! With no finalized block storage, the string is expected to be in the order of magniture of a
+//! With no finalized block storage, the string is expected to be in the order of magnitude of a
 //! few dozens kilobytes.
 //!
 //! The string format designed to be stable even if the structure of
@@ -98,5 +98,6 @@ enum CorruptedErrorInner {
     Serde(serde_json::Error),
     #[display(fmt = "{}", _0)]
     Deserialize(defs::DeserializeError),
+    #[display(fmt = "Invalid chain information: {}", _0)]
     InvalidChain(chain_information::ValidityError),
 }

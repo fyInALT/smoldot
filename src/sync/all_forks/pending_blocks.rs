@@ -81,7 +81,7 @@
 //!
 //! Call [`PendingBlocks::add_request`] to allocate a new [`RequestId`] and add a new request.
 //! Call [`PendingBlocks::finish_request`] to destroy a request after it has finished or been
-//! cancelled. Note that this method doesn't require to be passed the response to that request.
+//! canceled. Note that this method doesn't require to be passed the response to that request.
 //! The user is encouraged to update the state machine according to the response, but this must
 //! be done manually.
 //!
@@ -121,7 +121,7 @@ pub struct Config {
     /// Maximum number of simultaneous pending requests made towards the same block.
     ///
     /// Should be set according to the failure rate of requests. For example if requests have an
-    /// estimated 10% chance of failing, then setting to value to `2` gives a 1% chance that
+    /// estimated `10%` chance of failing, then setting to value to `2` gives a `1%` chance that
     /// downloading this block will overall fail and has to be attempted again.
     ///
     /// Also keep in mind that sources might maliciously take a long time to answer requests. A
@@ -265,7 +265,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Removes the source from the [`PendingBlocks`].
     ///
     /// Returns the user data that was originally passed to [`PendingBlocks::add_source`], plus
-    /// a list of all the requests that were targetting this source. These request are now
+    /// a list of all the requests that were targeting this source. These request are now
     /// invalid.
     ///
     /// # Panic
@@ -326,6 +326,13 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
     /// Returns the list of sources in this state machine.
     pub fn sources(&'_ self) -> impl ExactSizeIterator<Item = SourceId> + '_ {
         self.sources.keys()
+    }
+
+    /// Returns the list of all user datas of all sources.
+    pub fn sources_user_data_iter_mut(
+        &'_ mut self,
+    ) -> impl ExactSizeIterator<Item = &'_ mut TSrc> + '_ {
+        self.sources.user_data_iter_mut().map(|s| &mut s.user_data)
     }
 
     /// Registers a new block that the source is aware of.
@@ -755,7 +762,7 @@ impl<TBl, TRq, TSrc> PendingBlocks<TBl, TRq, TSrc> {
             .filter(|(height, hash)| {
                 !self
                     .sources
-                    .iter()
+                    .keys()
                     .any(|source_id| self.sources.best_block(source_id) == (*height, hash))
             })
     }

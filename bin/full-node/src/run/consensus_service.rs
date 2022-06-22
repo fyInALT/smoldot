@@ -26,7 +26,7 @@
 
 use crate::run::{database_thread, jaeger_service, network_service};
 
-use core::num::NonZeroU32;
+use core::{num::NonZeroU32, ops};
 use futures::{lock::Mutex, prelude::*};
 use hashbrown::HashSet;
 use smoldot::{
@@ -37,7 +37,7 @@ use smoldot::{
     identity::keystore,
     informant::HashDisplay,
     libp2p,
-    network::{self, protocol::BlockData, service::BlocksRequestError},
+    network::{self, protocol::BlockData},
     sync::all,
 };
 use std::{
@@ -83,7 +83,7 @@ pub struct Config<'a> {
     /// For example, passing `u16::max_value()` means that the entire slot is used. Passing
     /// `u16::max_value() / 2` means that half of the slot is used.
     ///
-    /// A typical value is `43691_u16`, representing 2/3rds of a slot.
+    /// A typical value is `43691_u16`, representing 2/3 of a slot.
     ///
     /// Note that this value doesn't determine the moment when creating the block has ended, but
     /// the moment when creating the block should start its final phase.
@@ -288,7 +288,7 @@ struct SyncBackground {
     keystore: Arc<keystore::Keystore>,
 
     /// Holds, in parallel of the database, the storage of the latest finalized block.
-    /// At the time of writing, this state is stable around ~3MiB for Polkadot, meaning that it is
+    /// At the time of writing, this state is stable around `~3MiB` for Polkadot, meaning that it is
     /// completely acceptable to hold it entirely in memory.
     // While reading the storage from the database is an option, doing so considerably slows down
     /// the verification, and also makes it impossible to insert blocks in the database in
@@ -323,7 +323,10 @@ struct SyncBackground {
             'static,
             (
                 all::RequestId,
-                Result<Result<Vec<BlockData>, BlocksRequestError>, future::Aborted>,
+                Result<
+                    Result<Vec<BlockData>, network_service::BlocksRequestError>,
+                    future::Aborted,
+                >,
             ),
         >,
     >,
@@ -491,7 +494,7 @@ impl SyncBackground {
                                 all::BlockAnnounceOutcome::AlreadyInChain => {},
                                 all::BlockAnnounceOutcome::NotFinalizedChain => {},
                                 all::BlockAnnounceOutcome::Discarded => {},
-                                all::BlockAnnounceOutcome::Disjoint {} => {},
+                                all::BlockAnnounceOutcome::StoredForLater {} => {},
                                 all::BlockAnnounceOutcome::InvalidHeader(_) => unreachable!(),
                             }
                         },
@@ -696,7 +699,10 @@ impl SyncBackground {
                             .prefix_keys_ordered(
                                 prefix_key.prefix().as_ref(),
                                 self.finalized_block_storage
-                                    .range((prefix_key.prefix().as_ref().to_vec())..)
+                                    .range::<[u8], _>((
+                                        ops::Bound::Included(prefix_key.prefix().as_ref()),
+                                        ops::Bound::Unbounded,
+                                    ))
                                     .take_while(|(k, _)| {
                                         k.starts_with(prefix_key.prefix().as_ref())
                                     })
@@ -749,7 +755,7 @@ impl SyncBackground {
             true, // Since the new block is a child of the current best block, it always becomes the new best.
         ) {
             all::BlockAnnounceOutcome::HeaderVerify
-            | all::BlockAnnounceOutcome::Disjoint
+            | all::BlockAnnounceOutcome::StoredForLater
             | all::BlockAnnounceOutcome::Discarded => {}
             all::BlockAnnounceOutcome::TooOld { .. }
             | all::BlockAnnounceOutcome::AlreadyInChain
@@ -1054,23 +1060,27 @@ impl SyncBackground {
                                 verify = req.inject_value(value);
                             }
                             all::BlockVerification::FinalizedStorageNextKey(req) => {
-                                // TODO: to_vec() :-/
+                                // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
                                 let req_key = req.key().as_ref().to_vec();
-                                // TODO: to_vec() :-/
                                 let next_key = self
                                     .finalized_block_storage
-                                    .range(req.key().as_ref().to_vec()..)
+                                    .range::<[u8], _>((
+                                        ops::Bound::Included(req.key().as_ref()),
+                                        ops::Bound::Unbounded,
+                                    ))
                                     .find(move |(k, _)| k[..] > req_key[..])
                                     .map(|(k, _)| k);
                                 verify = req.inject_key(next_key);
                             }
                             all::BlockVerification::FinalizedStoragePrefixKeys(req) => {
-                                // TODO: to_vec() :-/
+                                // TODO: to_vec() :-/ range() immediately calculates the range of keys so there's no borrowing issue, but the take_while needs to keep req borrowed, which isn't possible
                                 let prefix = req.prefix().as_ref().to_vec();
-                                // TODO: to_vec() :-/
                                 let keys = self
                                     .finalized_block_storage
-                                    .range(req.prefix().as_ref().to_vec()..)
+                                    .range::<[u8], _>((
+                                        ops::Bound::Included(req.prefix().as_ref()),
+                                        ops::Bound::Unbounded,
+                                    ))
                                     .take_while(|(k, _)| k.starts_with(&prefix))
                                     .map(|(k, _)| k);
                                 verify = req.inject_keys_ordered(keys);
@@ -1079,9 +1089,9 @@ impl SyncBackground {
                     }
                 }
 
-                all::ProcessOne::VerifyJustification(verify) => {
+                all::ProcessOne::VerifyFinalityProof(verify) => {
                     let span = tracing::debug_span!(
-                        "justification-verification",
+                        "finality-proof-verification",
                         outcome = tracing::field::Empty,
                         error = tracing::field::Empty,
                     );
@@ -1090,7 +1100,7 @@ impl SyncBackground {
                     match verify.perform() {
                         (
                             sync_out,
-                            all::JustificationVerifyOutcome::NewFinalized {
+                            all::FinalityProofVerifyOutcome::NewFinalized {
                                 finalized_blocks,
                                 updates_best_block,
                             },
@@ -1148,7 +1158,23 @@ impl SyncBackground {
                             database_set_finalized(&self.database, new_finalized_hash).await;
                             continue;
                         }
-                        (sync_out, all::JustificationVerifyOutcome::Error(error)) => {
+                        (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitPending) => {
+                            span.record("outcome", &"pending");
+                            self.sync = sync_out;
+                            continue;
+                        }
+                        (sync_out, all::FinalityProofVerifyOutcome::AlreadyFinalized) => {
+                            span.record("outcome", &"already-finalized");
+                            self.sync = sync_out;
+                            continue;
+                        }
+                        (sync_out, all::FinalityProofVerifyOutcome::GrandpaCommitError(error)) => {
+                            span.record("outcome", &"failure");
+                            span.record("error", &tracing::field::display(error));
+                            self.sync = sync_out;
+                            continue;
+                        }
+                        (sync_out, all::FinalityProofVerifyOutcome::JustificationError(error)) => {
                             span.record("outcome", &"failure");
                             span.record("error", &tracing::field::display(error));
                             self.sync = sync_out;

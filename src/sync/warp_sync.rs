@@ -80,14 +80,14 @@ pub use warp_sync::Error as FragmentError;
 pub enum Error {
     #[display(fmt = "Missing :code")]
     MissingCode,
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "Invalid heap pages value: {}", _0)]
     InvalidHeapPages(executor::InvalidHeapPagesError),
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "Error during Babe epoch information: {}", _0)]
     BabeFetchEpoch(babe_fetch_epoch::Error),
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "Error initializing downloaded runtime: {}", _0)]
     NewRuntime(NewErr),
     /// Parameters produced by the runtime are incoherent.
-    #[display(fmt = "{}", _0)]
+    #[display(fmt = "Parameters produced by the runtime are incoherent: {}", _0)]
     InvalidChain(chain_information::ValidityError),
 }
 
@@ -960,7 +960,7 @@ impl<TSrc> VirtualMachineParamsGet<TSrc> {
         )
     }
 
-    /// Set the code and heappages from storage using the keys `:code` and `:heappages`
+    /// Set the code and heap pages from storage using the keys `:code` and `:heappages`
     /// respectively. Also allows setting an execution hint for the virtual machine.
     pub fn set_virtual_machine_params(
         self,

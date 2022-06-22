@@ -55,6 +55,7 @@ use crate::{
 use alloc::{
     borrow::ToOwned as _,
     boxed::Box,
+    collections::BTreeSet,
     vec::{self, Vec},
 };
 use core::{
@@ -109,6 +110,18 @@ pub struct ConfigFull {
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct RequestId(u64);
 
+impl RequestId {
+    /// Returns a value that compares inferior or equal to any other [`RequestId`].
+    pub fn min_value() -> Self {
+        Self(u64::min_value())
+    }
+
+    /// Returns a value that compares superior or equal to any other [`RequestId`].
+    pub fn max_value() -> Self {
+        Self(u64::max_value())
+    }
+}
+
 /// Identifier for a source in the [`OptimisticSync`].
 #[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct SourceId(u64);
@@ -157,7 +170,7 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
     sources: HashMap<SourceId, Source<TSrc>, fnv::FnvBuildHasher>,
 
     /// Next [`SourceId`] to allocate.
-    /// SourceIds are unique so that the source in the [`verification_queue::VerificationQueue`]
+    /// `SourceIds` are unique so that the source in the [`verification_queue::VerificationQueue`]
     /// doesn't accidentally collide with a new source.
     next_source_id: SourceId,
 
@@ -173,6 +186,9 @@ struct OptimisticSyncInner<TRq, TSrc, TBl> {
 
     /// Requests that have been started but whose answers are no longer desired.
     obsolete_requests: HashMap<RequestId, (SourceId, TRq), fnv::FnvBuildHasher>,
+
+    /// Same as [`OptimisticSyncInner::obsolete_requests`], but ordered differently.
+    obsolete_requests_by_source: BTreeSet<(SourceId, RequestId)>,
 }
 
 impl<TRq, TSrc, TBl> OptimisticSyncInner<TRq, TSrc, TBl> {
@@ -187,6 +203,14 @@ impl<TRq, TSrc, TBl> OptimisticSyncInner<TRq, TSrc, TBl> {
                 .obsolete_requests
                 .insert(request_id, (source, user_data));
             debug_assert!(_was_in.is_none());
+            let _was_inserted = self
+                .obsolete_requests_by_source
+                .insert((source, request_id));
+            debug_assert!(_was_inserted);
+            debug_assert_eq!(
+                self.obsolete_requests.len(),
+                self.obsolete_requests_by_source.len()
+            );
         }
     }
 
@@ -208,7 +232,7 @@ struct Source<TSrc> {
 
     /// If `true`, this source is banned and shouldn't use be used to request blocks.
     /// Note that the ban is lifted if the source is removed. This ban isn't meant to be a line of
-    /// defense against malicious peers but rather an optimisation.
+    /// defense against malicious peers but rather an optimization.
     banned: bool,
 
     /// Number of requests that use this source.
@@ -238,7 +262,7 @@ pub struct BlockFull {
     /// Changes to the storage made by this block compared to its parent.
     pub storage_top_trie_changes: storage_diff::StorageDiff,
 
-    /// List of changes to the offchain storage that this block performs.
+    /// List of changes to the off-chain storage that this block performs.
     pub offchain_storage_changes: storage_diff::StorageDiff,
 }
 
@@ -273,6 +297,7 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 download_ahead_blocks: config.download_ahead_blocks,
                 next_request_id: RequestId(0),
                 obsolete_requests: HashMap::with_capacity_and_hasher(0, Default::default()),
+                obsolete_requests_by_source: BTreeSet::new(),
             }),
         }
     }
@@ -439,12 +464,33 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
         &'_ mut self,
         source_id: SourceId,
     ) -> (TSrc, impl Iterator<Item = (RequestId, TRq)> + '_) {
-        // TODO: doesn't take obsolete requests into account /!\
+        let obsolete_requests_to_remove = self
+            .inner
+            .obsolete_requests_by_source
+            .range((source_id, RequestId::min_value())..=(source_id, RequestId::max_value()))
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
+        let mut obsolete_requests = Vec::with_capacity(obsolete_requests_to_remove.len());
+        for rq_id in obsolete_requests_to_remove {
+            let (_, user_data) = self.inner.obsolete_requests.remove(&rq_id).unwrap();
+            obsolete_requests.push((rq_id, user_data));
+            let _was_in = self
+                .inner
+                .obsolete_requests_by_source
+                .remove(&(source_id, rq_id));
+            debug_assert!(_was_in);
+        }
+
+        debug_assert_eq!(
+            self.inner.obsolete_requests.len(),
+            self.inner.obsolete_requests_by_source.len()
+        );
+
         let src_user_data = self.inner.sources.remove(&source_id).unwrap().user_data;
         let drain = RequestsDrain {
             iter: self.inner.verification_queue.drain_source(source_id),
         };
-        (src_user_data, drain)
+        (src_user_data, drain.chain(obsolete_requests))
     }
 
     /// Returns the list of sources in this state machine.
@@ -461,9 +507,8 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     pub fn source_num_ongoing_requests(&self, source_id: SourceId) -> usize {
         let num_obsolete = self
             .inner
-            .obsolete_requests
-            .values()
-            .filter(|(id, _)| *id == source_id)
+            .obsolete_requests_by_source
+            .range((source_id, RequestId::min_value())..=(source_id, RequestId::max_value()))
             .count();
         let num_regular = self
             .inner
@@ -531,6 +576,15 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
                 self.inner
                     .obsolete_requests
                     .insert(request_id, (detail.source_id, user_data));
+                let _was_inserted = self
+                    .inner
+                    .obsolete_requests_by_source
+                    .insert((detail.source_id, request_id));
+                debug_assert!(_was_inserted);
+                debug_assert_eq!(
+                    self.inner.obsolete_requests.len(),
+                    self.inner.obsolete_requests_by_source.len()
+                );
             }
         }
 
@@ -559,6 +613,15 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     ) -> (TRq, FinishRequestOutcome) {
         if let Some((source_id, user_data)) = self.inner.obsolete_requests.remove(&request_id) {
             self.inner.obsolete_requests.shrink_to_fit();
+            let _was_in = self
+                .inner
+                .obsolete_requests_by_source
+                .remove(&(source_id, request_id));
+            debug_assert!(_was_in);
+            debug_assert_eq!(
+                self.inner.obsolete_requests.len(),
+                self.inner.obsolete_requests_by_source.len()
+            );
             self.inner
                 .sources
                 .get_mut(&source_id)
@@ -592,6 +655,15 @@ impl<TRq, TSrc, TBl> OptimisticSync<TRq, TSrc, TBl> {
     pub fn finish_request_failed(&mut self, request_id: RequestId) -> TRq {
         if let Some((source_id, user_data)) = self.inner.obsolete_requests.remove(&request_id) {
             self.inner.obsolete_requests.shrink_to_fit();
+            let _was_in = self
+                .inner
+                .obsolete_requests_by_source
+                .remove(&(source_id, request_id));
+            debug_assert!(_was_in);
+            debug_assert_eq!(
+                self.inner.obsolete_requests.len(),
+                self.inner.obsolete_requests_by_source.len()
+            );
             self.inner
                 .sources
                 .get_mut(&source_id)
@@ -706,7 +778,7 @@ impl<'a, TRq, TSrc, TBl> BlockStorage<'a, TRq, TSrc, TBl> {
             .inner
             .best_runtime
             .as_ref()
-            .unwrap_or(self.inner.inner.finalized_runtime.as_ref().unwrap())
+            .unwrap_or_else(|| self.inner.inner.finalized_runtime.as_ref().unwrap())
     }
 
     /// Returns the storage value at the given key. `None` if this key doesn't have any value.
@@ -1485,10 +1557,13 @@ impl<'a, TRq, TBl> Drop for RequestsDrain<'a, TRq, TBl> {
 #[derive(Debug, derive_more::Display)]
 pub enum ResetCause {
     /// Error while decoding a header.
+    #[display(fmt = "Failed to decode header: {}", _0)]
     InvalidHeader(header::Error),
     /// Error while verifying a header.
+    #[display(fmt = "{}", _0)]
     HeaderError(blocks_tree::HeaderVerifyError),
     /// Error while verifying a header and body.
+    #[display(fmt = "{}", _0)]
     HeaderBodyError(blocks_tree::BodyVerifyError),
     /// Received block isn't a child of the current best block.
     NonCanonical,

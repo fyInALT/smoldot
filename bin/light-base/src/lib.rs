@@ -73,15 +73,15 @@ pub struct AddChainConfig<'a, TChain, TRelays> {
     /// chains, it means that a call to [`Client::add_chain`] could influence the outcome of a
     /// subsequent call to [`Client::add_chain`].
     ///
-    /// For example: if user A adds a chain named "kusama", then user B adds a different chain
-    /// also named "kusama", then user B adds a parachain whose relay chain is "kusama", it would
-    /// be wrong to connect to the "kusama" created by user A.
+    /// For example: if user A adds a chain named "Kusama", then user B adds a different chain
+    /// also named "Kusama", then user B adds a parachain whose relay chain is "Kusama", it would
+    /// be wrong to connect to the "Kusama" created by user A.
     pub potential_relay_chains: TRelays,
 
     /// Channel to use to send the JSON-RPC responses.
     ///
     /// If `None`, then no JSON-RPC service is started for this chain. This saves up a lot of
-    /// resources, but will cause all JSON-RPC requests targetting this chain to fail.
+    /// resources, but will cause all JSON-RPC requests targeting this chain to fail.
     pub json_rpc_responses: Option<mpsc::Sender<String>>,
 }
 
@@ -98,12 +98,23 @@ pub trait Platform: Send + 'static {
         + Send
         + Sync
         + 'static;
+
+    /// A multi-stream connection.
+    ///
+    /// This object is merely a handle. The underlying connection should be dropped only after
+    /// the `Connection` and all its associated substream objects ([`Platform::Stream`]) have
+    /// been dropped.
     type Connection: Send + Sync + 'static;
-    type ConnectFuture: Future<Output = Result<Self::Connection, ConnectError>>
+    type Stream: Send + Sync + 'static;
+    type ConnectFuture: Future<Output = Result<PlatformConnection<Self::Stream, Self::Connection>, ConnectError>>
         + Unpin
         + Send
         + 'static;
-    type ConnectionDataFuture: Future<Output = ()> + Unpin + Send + 'static;
+    type StreamDataFuture: Future<Output = ()> + Unpin + Send + 'static;
+    type NextSubstreamFuture: Future<Output = Option<(Self::Stream, PlatformSubstreamDirection)>>
+        + Unpin
+        + Send
+        + 'static;
 
     /// Returns the time elapsed since [the Unix Epoch](https://en.wikipedia.org/wiki/Unix_time)
     /// (i.e. 00:00:00 UTC on 1 January 1970), ignoring leap seconds.
@@ -130,37 +141,74 @@ pub trait Platform: Send + 'static {
     /// returned where [`ConnectError::is_bad_addr`] is `true`.
     fn connect(url: &str) -> Self::ConnectFuture;
 
-    /// Returns a future that becomes ready when either the read buffer of the given connection
+    /// Queues the opening of an additional outbound substream.
+    ///
+    /// The substream, once opened, must be yielded by [`Platform::next_substream`].
+    fn open_out_substream(connection: &mut Self::Connection);
+
+    /// Waits until a new incoming substream arrives on the connection.
+    ///
+    /// This returns both inbound and outbound substreams. Outbound substreams should only be
+    /// yielded once for every call to [`Platform::open_out_substream`].
+    ///
+    /// The future can also return `None` if the connection has been killed by the remote. If
+    /// the future returns `None`, the user of the `Platform` should drop the `Connection` and
+    /// all its associated `Stream`s as soon as possible.
+    fn next_substream(connection: &mut Self::Connection) -> Self::NextSubstreamFuture;
+
+    /// Returns a future that becomes ready when either the read buffer of the given stream
     /// contains data, or the remote has closed their sending side.
     ///
     /// The future is immediately ready if data is already available or the remote has already
     /// closed their sending side.
     ///
-    /// This function can be called multiple times with the same connection, in which case all
+    /// This function can be called multiple times with the same stream, in which case all
     /// the futures must be notified. The user of this function, however, is encouraged to
     /// maintain only one active future.
     ///
-    /// If the future is polled after the connection object has been dropped, the behaviour is
+    /// If the future is polled after the stream object has been dropped, the behavior is
     /// not specified. The polling might panic, or return `Ready`, or return `Pending`.
-    fn wait_more_data(connection: &mut Self::Connection) -> Self::ConnectionDataFuture;
+    fn wait_more_data(stream: &mut Self::Stream) -> Self::StreamDataFuture;
 
-    /// Gives access to the content of the read buffer of the given connection.
+    /// Gives access to the content of the read buffer of the given stream.
     ///
-    /// Returns `None` if the remote has closed their sending side.
-    fn read_buffer(connection: &mut Self::Connection) -> Option<&[u8]>;
+    /// Returns `None` if the remote has closed their sending side or if the stream has been
+    /// reset.
+    fn read_buffer(stream: &mut Self::Stream) -> Option<&[u8]>;
 
-    /// Discards the first `bytes` bytes of the read buffer of this connection. This makes it
+    /// Discards the first `bytes` bytes of the read buffer of this stream. This makes it
     /// possible for the remote to send more data.
     ///
     /// # Panic
     ///
     /// Panics if there aren't enough bytes to discard in the buffer.
     ///
-    fn advance_read_cursor(connection: &mut Self::Connection, bytes: usize);
+    fn advance_read_cursor(stream: &mut Self::Stream, bytes: usize);
 
     /// Queues the given bytes to be sent out on the given connection.
     // TODO: back-pressure
-    fn send(connection: &mut Self::Connection, data: &[u8]);
+    // TODO: allow closing sending side
+    fn send(stream: &mut Self::Stream, data: &[u8]);
+}
+
+/// Type of opened connection. See [`Platform::connect`].
+#[derive(Debug)]
+pub enum PlatformConnection<TStream, TConnection> {
+    /// The connection is a single stream on top of which encryption and multiplexing should be
+    /// negotiated. The division in multiple substreams is handled internally.
+    SingleStream(TStream),
+    /// The connection is made of multiple substreams. The encryption and multiplexing are handled
+    /// externally.
+    MultiStream(TConnection, peer_id::PeerId),
+}
+
+/// Direction in which a substream has been opened. See [`Platform::next_substream`].
+#[derive(Debug)]
+pub enum PlatformSubstreamDirection {
+    /// Substream has been opened by the remote.
+    Inbound,
+    /// Substream has been opened locally in response to [`Platform::open_out_substream`].
+    Outbound,
 }
 
 /// Error potentially returned by [`Platform::connect`].
@@ -348,11 +396,12 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
         // Load the information about the chain from the chain spec. If a light sync state (also
         // known as a checkpoint) is present in the chain spec, it is possible to start syncing at
         // the finalized block it describes.
-        let chain_information = {
+        // TODO: clean up that block
+        let (chain_information, genesis_block_header) = {
             match (
                 chain_spec
-                    .as_chain_information() // TODO: very expensive, don't always call?
-                    .map(chain::chain_information::ValidChainInformation::try_from),
+                    .as_chain_information()
+                    .map(|(ci, _)| chain::chain_information::ValidChainInformation::try_from(ci)), // TODO: don't just throw away the runtime
                 chain_spec.light_sync_state().map(|s| {
                     chain::chain_information::ValidChainInformation::try_from(
                         s.as_chain_information(),
@@ -360,7 +409,45 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                 }),
                 finalized_serialize::decode_chain(config.database_content),
             ) {
-                (_, _, Ok((ci, _))) => ci,
+                // Use the database if it contains a more recent block than the chain spec checkpoint.
+                (Ok(Ok(genesis_ci)), checkpoint, Ok((database, _)))
+                    if checkpoint
+                        .as_ref()
+                        .map(|r| r.as_ref().ok())
+                        .flatten()
+                        .map_or(true, |cp| {
+                            cp.as_ref().finalized_block_header.number
+                                < database.as_ref().finalized_block_header.number
+                        }) =>
+                {
+                    let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
+                    (database, genesis_header.into())
+                }
+
+                // Use the database if it contains a more recent block than the chain spec checkpoint.
+                (
+                    Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
+                    checkpoint,
+                    Ok((database, _)),
+                ) if checkpoint
+                    .as_ref()
+                    .map(|r| r.as_ref().ok())
+                    .flatten()
+                    .map_or(true, |cp| {
+                        cp.as_ref().finalized_block_header.number
+                            < database.as_ref().finalized_block_header.number
+                    }) =>
+                {
+                    let genesis_header = header::Header {
+                        parent_hash: [0; 32],
+                        number: 0,
+                        state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
+                        extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
+                        digest: header::DigestRef::empty().into(),
+                    };
+
+                    (database, genesis_header)
+                }
 
                 (Err(chain_spec::FromGenesisStorageError::UnknownStorageItems), None, _) => {
                     // TODO: we can in theory support chain specs that have neither a checkpoint nor the genesis storage, but it's complicated
@@ -374,9 +461,19 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
 
                 (
                     Err(chain_spec::FromGenesisStorageError::UnknownStorageItems),
-                    Some(Ok(ci)),
+                    Some(Ok(checkpoint)),
                     _,
-                ) => ci,
+                ) => {
+                    let genesis_header = header::Header {
+                        parent_hash: [0; 32],
+                        number: 0,
+                        state_root: *chain_spec.genesis_storage().into_trie_root_hash().unwrap(),
+                        extrinsics_root: smoldot::trie::empty_trie_merkle_value(),
+                        digest: header::DigestRef::empty().into(),
+                    };
+
+                    (checkpoint, genesis_header)
+                }
 
                 (Err(err), _, _) => {
                     return ChainId(self.public_api_chains.insert(PublicApiChain::Erroneous {
@@ -399,15 +496,18 @@ impl<TChain, TPlat: Platform> Client<TChain, TPlat> {
                     }));
                 }
 
-                (_, Some(Ok(ci)), _) => ci,
+                (Ok(Ok(genesis_ci)), Some(Ok(checkpoint)), _) => {
+                    let genesis_header = genesis_ci.as_ref().finalized_block_header.clone();
+                    (checkpoint, genesis_header.into())
+                }
 
-                (Ok(Ok(ci)), None, _) => ci,
+                (Ok(Ok(genesis_ci)), None, _) => {
+                    let genesis_header =
+                        header::Header::from(genesis_ci.as_ref().finalized_block_header.clone());
+                    (genesis_ci, genesis_header)
+                }
             }
         };
-
-        // Even with a checkpoint, knowing the genesis block header is necessary for various
-        // reasons.
-        let genesis_block_header = smoldot::calculate_genesis_block_header(&chain_spec);
 
         // If the chain specification specifies a parachain, find the corresponding relay chain
         // in the list of potential relay chains passed by the user.

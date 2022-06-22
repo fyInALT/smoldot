@@ -57,7 +57,7 @@ use smoldot::{
 use std::{
     collections::HashMap,
     iter,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     str,
     sync::{atomic, Arc},
     time::Duration,
@@ -407,8 +407,8 @@ struct Background<TPlat: Platform> {
     chain_properties_json: String,
     /// Whether the chain is a live network. Found in the chain specification.
     chain_is_live: bool,
-    /// See [`StartConfig::peer_id`]. The only use for this field is to send the base58 encoding of
-    /// the [`PeerId`]. Consequently, we store the conversion to base58 ahead of time.
+    /// See [`StartConfig::peer_id`]. The only use for this field is to send the Base58 encoding of
+    /// the [`PeerId`]. Consequently, we store the conversion to Base58 ahead of time.
     peer_id_base58: String,
     /// Value to return when the `system_name` RPC is called.
     system_name: String,
@@ -602,7 +602,7 @@ impl<TPlat: Platform> Background<TPlat> {
                     // malicious.
                     let mut subscribe_all = me
                         .runtime_service
-                        .subscribe_all(32, usize::max_value())
+                        .subscribe_all(32, NonZeroUsize::new(usize::max_value()).unwrap())
                         .await;
 
                     cache.subscription_id = Some(subscribe_all.new_blocks.id());
@@ -692,7 +692,7 @@ impl<TPlat: Platform> Background<TPlat> {
             Err(methods::ParseError::Method { request_id, error }) => {
                 log::warn!(
                     target: &self.log_target,
-                    "Error in JSON-RPC method call: {}", error
+                    "Error in JSON-RPC method call with id {:?}: {}", request_id, error
                 );
                 self.requests_subscriptions
                     .respond(&state_machine_request_id, error.to_json_error(request_id))
@@ -797,6 +797,20 @@ impl<TPlat: Platform> Background<TPlat> {
             methods::MethodCall::rpc_methods {} => {
                 self.rpc_methods(request_id, &state_machine_request_id)
                     .await;
+            }
+            methods::MethodCall::state_call {
+                name,
+                parameters,
+                hash,
+            } => {
+                self.state_call(
+                    request_id,
+                    &state_machine_request_id,
+                    &name,
+                    parameters,
+                    hash,
+                )
+                .await;
             }
             methods::MethodCall::state_getKeysPaged {
                 prefix,
@@ -1069,7 +1083,6 @@ impl<TPlat: Platform> Background<TPlat> {
             | methods::MethodCall::grandpa_roundState { .. }
             | methods::MethodCall::offchain_localStorageGet { .. }
             | methods::MethodCall::offchain_localStorageSet { .. }
-            | methods::MethodCall::state_call { .. }
             | methods::MethodCall::state_getKeys { .. }
             | methods::MethodCall::state_getPairs { .. }
             | methods::MethodCall::state_getReadProof { .. }
@@ -1433,6 +1446,7 @@ enum StorageQueryError {
     StorageRetrieval(sync_service::StorageQueryError),
 }
 
+// TODO: doc and properly derive Display
 #[derive(Debug, derive_more::Display, Clone)]
 enum RuntimeCallError {
     Call(runtime_service::RuntimeCallError),

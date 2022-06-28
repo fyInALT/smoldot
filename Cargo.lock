@@ -474,9 +474,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "3.2.5"
+version = "3.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d53da17d37dba964b9b3ecb5c5a1f193a2762c700e6829201e645b9381c99dc7"
+checksum = "9f1fe12880bae935d142c8702d500c63a4e8634b6c3c57ad72bf978fc7b6249a"
 dependencies = [
  "atty",
  "bitflags",
@@ -491,9 +491,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "3.2.5"
+version = "3.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c11d40217d16aee8508cc8e5fde8b4ff24639758608e5374e731b53f85749fb9"
+checksum = "ed6db9e867166a43a53f7199b5e4d1f522a1e5bd626654be263c999ce59df39a"
 dependencies = [
  "heck",
  "proc-macro-error",
@@ -1570,9 +1570,9 @@ dependencies = [
 
 [[package]]
 name = "num-rational"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d41702bd167c2df5520b384281bc111a4b5efcf7fbc4c9c222c815b07e0a6a6a"
+checksum = "0638a1c9d0a3c0914158145bc76cff373a75a627e6ecbfb71cbe6f453a5a19b0"
 dependencies = [
  "autocfg",
  "num-bigint",
@@ -2313,7 +2313,7 @@ dependencies = [
  "no-std-net",
  "nom",
  "num-bigint",
- "num-rational 0.4.0",
+ "num-rational 0.4.1",
  "num-traits",
  "parity-scale-codec",
  "parking_lot 0.12.1",
@@ -2345,7 +2345,7 @@ dependencies = [
  "async-std",
  "atty",
  "blake2-rfc",
- "clap 3.2.5",
+ "clap 3.2.6",
  "ctrlc",
  "derive_more",
  "directories",
@@ -2387,7 +2387,7 @@ dependencies = [
 
 [[package]]
 name = "smoldot-light-wasm"
-version = "0.6.19"
+version = "0.6.20"
 dependencies = [
  "event-listener",
  "futures",
